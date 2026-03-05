@@ -1,0 +1,516 @@
+{
+  "name": "Google Sheets to Tally -Modified-Original",
+  "nodes": [
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1U-Q1DPO3PiT2FflxPDkrLlhGznQOQId89Ztx8OWhwLI/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1U-Q1DPO3PiT2FflxPDkrLlhGznQOQId89Ztx8OWhwLI/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "options": {}
+      },
+      "name": "Read Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -2832,
+        528
+      ],
+      "id": "72789eeb-b610-4daa-a525-e38432de04cd",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Prl3J3spbbOJfXum",
+          "name": "MIS Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "4cf3b090-977f-49af-9a1d-2bccbca47d95",
+              "leftValue": "={{ $json.Status }}",
+              "rightValue": "\"\"",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Filter Unposted Rows",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -2608,
+        528
+      ],
+      "id": "181d8af0-bf47-4af9-8f4c-12a109bb56c9"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:{{ $json.Port }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/xml",
+        "body": "={{$json.xml}}",
+        "options": {}
+      },
+      "name": "Send to Tally",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -1952,
+        384
+      ],
+      "id": "2e0301b6-781a-4a44-a0c8-5cb9a50cdcea"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -3056,
+        528
+      ],
+      "id": "ac8e3dd3-f113-4ca5-a214-3ef392552c1d",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const xmlData = item.json.data;\n\n  // ✅ SR_NO COMES FROM MERGE NODE (NOT FROM TALLY)\n  const srNo = item.json.SR_NO;\n  const rowNumber = item.json.row_number;\n\n  let status = \"Failed\";\n  let errorMessage = \"\";\n\n  if (\n    xmlData.includes(\"<CREATED>1</CREATED>\") &&\n    !xmlData.includes(\"<EXCEPTIONS>1</EXCEPTIONS>\")\n  ) {\n    status = \"Posted\";\n  } else {\n    const err = xmlData.match(/<LINEERROR>(.*?)<\\/LINEERROR>/);\n    if (err) errorMessage = err[1];\n  }\n\n  const vchIdMatch = xmlData.match(/<LASTVCHID>(\\d+)<\\/LASTVCHID>/);\n\n  results.push({\n    json: {\n      SR_NO: srNo,                 // ✅ NOW ALWAYS PRESENT\n      row_number: rowNumber,\n      status,\n      voucherId: vchIdMatch ? vchIdMatch[1] : \"\",\n      errorMessage\n    }\n  });\n}\n\nreturn results;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1520,
+        528
+      ],
+      "id": "101a5e55-7127-44f7-bfde-b9bd15278200",
+      "name": "Parse Tally Response Code Node"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const row = $input.item.json;\n\n// --------------------\n// IDENTIFIERS (n8n-only)\n// --------------------\nconst srNo = row.SR_NO;\nconst rowNumber = row.row_number;\nconst tallyPort = row.Port || 9000;\n\n// --------------------------------------------------\n// XML Escape (Critical)\n// --------------------------------------------------\nfunction escapeXML(str) {\n  return String(str || \"\")\n    .replace(/&/g, \"&amp;\")\n    .replace(/</g, \"&lt;\")\n    .replace(/>/g, \"&gt;\")\n    .replace(/\"/g, \"&quot;\")\n    .replace(/'/g, \"&apos;\");\n}\n\n// --------------------------------------------------\n// Date Formatter (DD-MM-YYYY → YYYYMMDD)\n// --------------------------------------------------\nfunction formatDateForTally(input) {\n  if (!input) throw new Error(\"VoucherDate is empty\");\n  const [dd, mm, yyyy] = String(input).split(\"-\");\n  if (!dd || !mm || !yyyy) throw new Error(`Invalid VoucherDate: ${input}`);\n  return `${yyyy}${mm.padStart(2, \"0\")}${dd.padStart(2, \"0\")}`;\n}\n\n// --------------------------------------------------\n// Safe Number\n// --------------------------------------------------\nfunction toNumber(val, fieldName = \"Amount\") {\n  const num = Number(val);\n  if (isNaN(num)) throw new Error(`Invalid ${fieldName}: ${val}`);\n  return num;\n}\n\n// --------------------------------------------------\n// Normalize Bill Type (🔥 FIX FOR ADVANCE)\n// --------------------------------------------------\nfunction normalizeBillType(type) {\n  const t = String(type || \"\").trim().toLowerCase();\n\n  if (t === \"advance\") return \"New Ref\";  // 🔥 Critical Fix\n  if (t === \"new ref\") return \"New Ref\";\n  if (t === \"agst ref\") return \"Agst Ref\";\n  if (t === \"on account\") return \"On Account\";\n\n  return \"Agst Ref\"; // Safe default\n}\n\n// --------------------------------------------------\n// Bill Allocation XML Builder\n// --------------------------------------------------\nfunction buildBillXML(billNo, billAmount, billType, ledgerAmount, voucherAmount) {\n\n  if (!billNo || !billAmount) {\n    return `\n    <BILLALLOCATIONS.LIST>\n      <NAME>On Account</NAME>\n      <BILLTYPE>On Account</BILLTYPE>\n      <AMOUNT>${ledgerAmount}</AMOUNT>\n    </BILLALLOCATIONS.LIST>`;\n  }\n\n  const billNos = String(billNo).split(\"|\").map(b => b.trim());\n  const billAmounts = String(billAmount).split(\"|\").map(b => b.trim());\n  const billTypes = String(billType || \"Agst Ref\")\n    .split(\"|\")\n    .map(b => normalizeBillType(b.trim()));\n\n  if (billNos.length !== billAmounts.length) {\n    throw new Error(\"BillNo count does not match BillAmount count\");\n  }\n\n  let billTotal = 0;\n  let billXML = \"\";\n\n  for (let i = 0; i < billNos.length; i++) {\n    const amt = toNumber(billAmounts[i], \"BillAmount\");\n    billTotal += amt;\n\n    const finalAmt = ledgerAmount < 0 ? -amt : amt;\n\n    billXML += `\n    <BILLALLOCATIONS.LIST>\n      <NAME>${escapeXML(billNos[i])}</NAME>\n      <BILLTYPE>${escapeXML(billTypes[i] || \"Agst Ref\")}</BILLTYPE>\n      <AMOUNT>${finalAmt}</AMOUNT>\n    </BILLALLOCATIONS.LIST>`;\n  }\n\n  if (billTotal > voucherAmount) {\n    throw new Error(\n      `Bill total (${billTotal}) exceeds Voucher Amount (${voucherAmount})`\n    );\n  }\n\n  const balance = voucherAmount - billTotal;\n\n  if (balance > 0) {\n    const finalBal = ledgerAmount < 0 ? -balance : balance;\n\n    billXML += `\n    <BILLALLOCATIONS.LIST>\n      <NAME>On Account</NAME>\n      <BILLTYPE>On Account</BILLTYPE>\n      <AMOUNT>${finalBal}</AMOUNT>\n    </BILLALLOCATIONS.LIST>`;\n  }\n\n  return billXML;\n}\n\n// --------------------------------------------------\n// Ledger Entry Builder\n// --------------------------------------------------\nfunction buildLedgerEntry(\n  ledgerName,\n  amount,\n  isDeemedPositive,\n  narration = \"\",\n  billData = null,\n  voucherAmount = 0\n) {\n\n  let narrationXML = narration\n    ? `<NARRATION>${escapeXML(narration)}</NARRATION>`\n    : \"\";\n\n  let billXML = \"\";\n\n  if (billData) {\n    billXML = buildBillXML(\n      billData.billNo,\n      billData.billAmount,\n      billData.billType,\n      amount,\n      voucherAmount\n    );\n  }\n\n  return `\n  <ALLLEDGERENTRIES.LIST>\n    <LEDGERNAME>${escapeXML(ledgerName)}</LEDGERNAME>\n    ${narrationXML}\n    <ISDEEMEDPOSITIVE>${isDeemedPositive}</ISDEEMEDPOSITIVE>\n    <AMOUNT>${amount}</AMOUNT>\n    ${billXML}\n  </ALLLEDGERENTRIES.LIST>`;\n}\n\n// --------------------------------------------------\n// Base Values\n// --------------------------------------------------\nconst date = formatDateForTally(row.VoucherDate);\nconst voucherType = String(row.VoucherType).trim();\nconst company = row.Company;\nconst voucherNo = row.VoucherNo;\nconst narration = row.Narration || \"\";\n\n// --------------------------------------------------\n// Parse Ledgers\n// --------------------------------------------------\nconst partyLedgers = String(row.PartyLedger).split(\"|\").map(l => l.trim());\nconst counterLedgers = String(row.CounterLedger).split(\"|\").map(l => l.trim());\n\n// --------------------------------------------------\n// Parse Amounts\n// --------------------------------------------------\nconst amountStr = String(row.Amount).trim();\nlet partyAmounts = amountStr.includes(\"|\")\n  ? amountStr.split(\"|\").map(a => Math.abs(toNumber(a)))\n  : [Math.abs(toNumber(amountStr))];\n\nif (partyLedgers.length !== partyAmounts.length) {\n  throw new Error(\"Ledger count does not match Amount count\");\n}\n\nconst voucherAmount = partyAmounts.reduce((sum, amt) => sum + amt, 0);\n\n// --------------------------------------------------\n// Voucher Type Logic\n// --------------------------------------------------\nlet partySign, counterSign, isContraXML = \"\";\n\nif (voucherType === \"Receipt\") {\n  partySign = 1;\n  counterSign = -1;\n}\nelse if (voucherType === \"Payment\") {\n  partySign = -1;\n  counterSign = 1;\n}\nelse if (voucherType === \"Contra\") {\n  partySign = -1;\n  counterSign = 1;\n  isContraXML = `<ISCONTRA>Yes</ISCONTRA>`;\n}\nelse {\n  throw new Error(`Unsupported VoucherType: ${voucherType}`);\n}\n\n// --------------------------------------------------\n// Build Ledger Entries\n// --------------------------------------------------\nlet allLedgerEntriesXML = \"\";\n\nfor (let i = 0; i < partyLedgers.length; i++) {\n\n  const billData =\n    voucherType !== \"Contra\" && i === 0\n      ? {\n          billNo: row.BillNo,\n          billAmount: row.BillAmount,\n          billType: row.BillType\n        }\n      : null;\n\n  allLedgerEntriesXML += buildLedgerEntry(\n    partyLedgers[i],\n    partyAmounts[i] * partySign,\n    partySign < 0 ? \"Yes\" : \"No\",\n    \"\",\n    billData,\n    voucherAmount\n  );\n}\n\nallLedgerEntriesXML += buildLedgerEntry(\n  counterLedgers[0],\n  voucherAmount * counterSign,\n  counterSign < 0 ? \"Yes\" : \"No\"\n);\n\n// --------------------------------------------------\n// FINAL XML\n// --------------------------------------------------\nreturn {\n  xml: `<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Import Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <IMPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>Vouchers</REPORTNAME>\n        <STATICVARIABLES>\n          <SVCURRENTCOMPANY>${escapeXML(company)}</SVCURRENTCOMPANY>\n        </STATICVARIABLES>\n      </REQUESTDESC>\n      <REQUESTDATA>\n        <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\n          <VOUCHER VCHTYPE=\"${voucherType}\" ACTION=\"Create\">\n            <DATE>${date}</DATE>\n            <EFFECTIVEDATE>${date}</EFFECTIVEDATE>\n            <VOUCHERTYPENAME>${voucherType}</VOUCHERTYPENAME>\n            ${isContraXML}\n            <VOUCHERNUMBER>${escapeXML(voucherNo)}</VOUCHERNUMBER>\n            <NARRATION>${escapeXML(narration)}</NARRATION>\n            ${allLedgerEntriesXML}\n          </VOUCHER>\n        </TALLYMESSAGE>\n      </REQUESTDATA>\n    </IMPORTDATA>\n  </BODY>\n</ENVELOPE>`,\n\n  SR_NO: srNo,\n  row_number: rowNumber,\n  Port: tallyPort\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        496
+      ],
+      "id": "da1961ee-8baf-4d97-ac45-aa6b1f25d32e",
+      "name": "Convert JSON to XML"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d83dbd4a-814b-49ac-9444-6ee1147638d5",
+              "leftValue": "={{ $json.VoucherType }}",
+              "rightValue": "Receipt",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "819f8ead-c07a-4fe9-b6a3-79d3f78fac83",
+              "leftValue": "={{ $json.VoucherType }}",
+              "rightValue": "Payment",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "d6f9621b-81db-48c9-827f-8f0f3aeed2f9",
+              "leftValue": "={{ $json.VoucherType }}",
+              "rightValue": "Contra",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2384,
+        512
+      ],
+      "id": "08642c53-4be3-401d-9cdb-bbf9414e9b83",
+      "name": "Filter Voucher Type"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1U-Q1DPO3PiT2FflxPDkrLlhGznQOQId89Ztx8OWhwLI/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1U-Q1DPO3PiT2FflxPDkrLlhGznQOQId89Ztx8OWhwLI/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "={{ $json.status }}",
+            "SR_NO": "={{ $json.SR_NO }}"
+          },
+          "matchingColumns": [
+            "SR_NO"
+          ],
+          "schema": [
+            {
+              "id": "SR_NO",
+              "displayName": "SR_NO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "VoucherType",
+              "displayName": "VoucherType",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company",
+              "displayName": "Company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "VoucherDate",
+              "displayName": "VoucherDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "PartyLedger",
+              "displayName": "PartyLedger",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "CounterLedger",
+              "displayName": "CounterLedger",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Narration",
+              "displayName": "Narration",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "BillType",
+              "displayName": "BillType",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "BillNo",
+              "displayName": "BillNo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "BillAmount",
+              "displayName": "BillAmount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "LedgerNarration",
+              "displayName": "LedgerNarration",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "TxnType",
+              "displayName": "TxnType",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "InstrumentNo",
+              "displayName": "InstrumentNo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "InstrumentDate",
+              "displayName": "InstrumentDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Update Status in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -1360,
+        528
+      ],
+      "id": "f40f4cfe-6755-4f2d-a647-e8317535611e",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Prl3J3spbbOJfXum",
+          "name": "MIS Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1728,
+        528
+      ],
+      "id": "77a4b37a-8fe6-45aa-9c0b-fd14d5f81372",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Read Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Filter Unposted Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Unposted Rows": {
+      "main": [
+        [
+          {
+            "node": "Filter Voucher Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Tally": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Tally Response Code Node": {
+      "main": [
+        [
+          {
+            "node": "Update Status in Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert JSON to XML": {
+      "main": [
+        [
+          {
+            "node": "Send to Tally",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Filter Voucher Type": {
+      "main": [
+        [
+          {
+            "node": "Convert JSON to XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Parse Tally Response Code Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "4c2c3e42-7098-491c-8f55-c7c7d1ce6cf5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b3df56d2da60705852824a1fc3efebad486d44a8ea0dc26ae6584d3d736d0343"
+  },
+  "id": "K_ahdy-rTuEjF-OU3LCrl",
+  "tags": []
+}
